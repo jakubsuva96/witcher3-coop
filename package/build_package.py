@@ -69,7 +69,7 @@ def main():
     os.makedirs(os.path.join(relay, "server"))
     shutil.copy2(os.path.join(TOOLS, "relay", "build", "w3relay.exe"), relay)
     shutil.copy2(os.path.join(WO, "server", "build", "WitcherServer.jar"), os.path.join(relay, "server"))
-    for name in ("Host co-op.cmd", "Join co-op.cmd", "Host LAN co-op.cmd", "Join LAN co-op.cmd"):
+    for name in ("Host co-op.cmd", "Join co-op.cmd", "Host LAN co-op.cmd", "Join LAN co-op.cmd", "w3coop.ps1"):
         shutil.copy2(os.path.join(HERE, name), relay)
 
     docs = os.path.join(out, "W3Coop")
