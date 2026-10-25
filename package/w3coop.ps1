@@ -179,17 +179,26 @@ if (-not $found)
 Say "Host nalezen: $($found.Ip)" 'Green'
 Write-Config $name $found.Ip
 
-if ($found.SavePort -gt 0)
+function Get-HostSave([string]$saveBase)
 {
     $zip = Join-Path $env:TEMP 'w3coop-save.zip'
+    $resp = Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri "$saveBase/save" -OutFile $zip -PassThru
+    $files = Install-CoopSave $zip
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue
+    if ($files.Count -gt 0) { return $resp.Headers['X-Save-Name'] }
+    return ''
+}
+
+$installed = ''
+$saveBase = "http://$($found.Ip):$($found.SavePort)"
+if ($found.SavePort -gt 0)
+{
     try
     {
-        $resp = Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri "http://$($found.Ip):$($found.SavePort)/save" -OutFile $zip -PassThru
-        $files = Install-CoopSave $zip
-        Remove-Item $zip -Force -ErrorAction SilentlyContinue
-        if ($files.Count -gt 0)
+        $installed = Get-HostSave $saveBase
+        if ($installed)
         {
-            Say "Hostova uložená hra je v co-op slotu: $($resp.Headers['X-Save-Name'])" 'Green'
+            Say "Hostova uložená hra je v co-op slotu: $installed" 'Green'
             Say 'Ve hře dej Načíst hru a vyber nejnovější uloženou hru (nahoře). Tvoje vlastní uložené hry zůstaly beze změny.'
         }
     }
@@ -206,4 +215,24 @@ else
 
 Say ''
 Start-Game
-Start-Sleep -Seconds 5
+if ($NoGame -or $found.SavePort -le 0) { Start-Sleep -Seconds 5; exit 0 }
+
+# Keeps the co-op slot on the host's newest save while the game runs: resync and the host's death load it.
+Say 'Nech tohle okno otevřené, dokud hraješ: průběžně si bere hostovy nové uložené hry pro resync.' 'Green'
+Start-Sleep -Seconds 20
+while (Get-Process witcher3 -ErrorAction SilentlyContinue)
+{
+    try
+    {
+        $latest = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "$saveBase/save/name").Content.Trim()
+        if ($latest -and $latest -ne $installed)
+        {
+            $got = Get-HostSave $saveBase
+            if ($got) { $installed = $got; Say ("{0:HH:mm} nová uložená hra od hosta: {1}" -f (Get-Date), $got) }
+        }
+    }
+    catch { }
+    Start-Sleep -Seconds 10
+}
+Say 'Hra skončila.'
+Start-Sleep -Seconds 3
