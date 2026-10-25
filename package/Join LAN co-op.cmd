@@ -1,6 +1,8 @@
 @echo off
-rem Joins a Witcher 3 co-op game hosted on the same home network (LAN). The game finds the host by itself;
-rem to skip the search, pass the host's address: "Join LAN co-op.cmd" 192.168.1.20
+rem Joins a Witcher 3 co-op game hosted on the same home network (LAN). Run it after the host started
+rem "Host LAN co-op.cmd": it finds the host, fetches the host's newest save and sets up a separate co-op profile
+rem (your own settings and saves stay untouched). To skip the search, pass the host's address:
+rem   "Join LAN co-op.cmd" 192.168.1.20
 setlocal
 cd /d "%~dp0"
 set "NAME=%USERNAME%"
@@ -11,21 +13,11 @@ if defined INPUT set "NAME=%INPUT%"
 >name.txt echo %NAME%
 set "HOST=auto"
 if not "%~1"=="" set "HOST=%~1"
-(
-  echo ^<?xml version="1.0"?^>
-  echo ^<Config^>
-  echo 	^<Username^>%NAME%^</Username^>
-  echo 	^<ServerIP^>%HOST%^</ServerIP^>
-  echo 	^<Port^>40000^</Port^>
-  echo ^</Config^>
-) >"..\WitcherOnline\config.xml"
 echo.
-if "%HOST%"=="auto" (
-  echo Done. Start The Witcher 3 and load a save: the game looks for the host on the network
-  echo for up to 3 minutes, so the host can start a little later.
-) else (
-  echo Done. Start The Witcher 3 and load a save: the game connects to %HOST%.
-)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0lan-join.ps1" -Name "%NAME%" -HostAddress "%HOST%"
+echo.
+echo Start The Witcher 3 now. At the main menu it loads the host's save by itself and joins the host's party.
+echo Ctrl+F9 in game turns shared enemies and quests off and on.
 echo If this game crashes, its crash report goes to the host's PC the next time you connect.
 echo.
 pause

@@ -1,8 +1,13 @@
 # Checks the LAN stage 1 features without the game:
 #   server: version handshake (HELLO/WELCOME, mod and game mismatches, clients without HELLO dropped), LAN discovery,
 #   usernames taken from another address, stale co-op channels dropped, crash report uploads (LAN only, safe names);
-#   client: crash.cpp through crash_harness.exe (a crash report, a "no clean exit" report, sending both to the server).
-# Usage: lan_stage1_test.py --jar WitcherServer.jar [--harness crash_harness.exe] [--port 41910]
+#   server with --lan: the host announced (WELCOME and HOST), state sent about 30 times a second, the host's newest
+#   save handed over, the save port in the discovery answer;
+#   package\lan-join.ps1 against that server: host found, save fetched, co-op profile and config.xml written;
+#   client: crash.cpp through crash_harness.exe (a crash report, a "no clean exit" report, sending both to the server),
+#   profile.cpp through profile_harness.exe (Documents redirected to the co-op profile).
+# Usage: lan_stage1_test.py --jar WitcherServer.jar [--harness crash_harness.exe] [--profile-harness profile_harness.exe]
+#                           [--port 41910]
 import argparse
 import os
 import shutil
@@ -203,10 +208,166 @@ def harness_tests(harness, port, crash_port, server_dir, work):
     check("clean exit: no new report", len([d for d in os.listdir(reports) if d.endswith("-no-clean-exit")]) == 1, os.listdir(reports))
 
 
+def updates_per_second(s, seconds):
+    """How many UPDATE1A packets arrive per second (the server repeats each player's state on every tick)."""
+    count = 0
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            if s.recv(8192).decode().startswith("UPDATE1A\t"):
+                count += 1
+        except (socket.timeout, ConnectionResetError):
+            pass
+    return count / seconds
+
+
+def normal_server_lan_checks(port):
+    # without --lan: no host is named, and state goes out about 10 times a second
+    a = client(port)
+    send(a, "HELLO", "Norm", PROTOCOL, MOD_VERSION, GAME)
+    w = wait_for(a, "WELCOME", 2)
+    check("normal server: no LAN host named", w is not None and (len(w) < 5 or w[4] == ""), w)
+    send(a, "UPDATE1A", "Norm", "x")
+    rate = updates_per_second(a, 3)
+    check("normal server: state about 10 times a second", 7 <= rate <= 12, rate)
+
+
+def lan_server_tests(port, crash_port, saves_dir, lan_join, work):
+    # the game on the server's PC (loopback) is the host; the other player hears it in WELCOME and in HOST
+    host = client(port)
+    send(host, "HELLO", "Geralt", PROTOCOL, MOD_VERSION, GAME)
+    w = wait_for(host, "WELCOME", 2)
+    check("--lan: the local player is the host", w is not None and len(w) >= 5 and w[4] == "Geralt", w)
+    send(host, "UPDATE1A", "Geralt", "x")
+
+    try:
+        member = client(port, "127.0.0.2")
+        send(member, "HELLO", "Yennefer", PROTOCOL, MOD_VERSION, GAME)
+        w = wait_for(member, "WELCOME", 2)
+        check("--lan: the member hears who hosts (WELCOME)", w is not None and len(w) >= 5 and w[4] == "Geralt", w)
+        # a member in game sends its state all the time, which makes it one of the server's recipients
+        send(member, "UPDATE1A", "Yennefer", "x")
+        h = wait_for(member, "HOST", 4)
+        check("--lan: HOST repeated for the member", h is not None and h[1] == "Geralt", h)
+    except OSError as err:
+        print(f"INFO member checks skipped: cannot send from 127.0.0.2 ({err})")
+
+    # a fresh listener, so nothing queued up earlier is counted; it hears the host's state only
+    listener = client(port)
+    send(listener, "HELLO", "Listener", PROTOCOL, MOD_VERSION, GAME)
+    wait_for(listener, "WELCOME", 2)
+    # both keep sending as games do (a player silent for 5 s times out)
+    send(host, "UPDATE1A", "Geralt", "x")
+    send(listener, "UPDATE1A", "Listener", "x")
+    time.sleep(0.3)
+    while True:
+        try:
+            listener.recv(8192)
+        except (socket.timeout, ConnectionResetError):
+            break
+    seen = {}
+    end = time.time() + 3
+    next_keepalive = time.time() + 1
+    while time.time() < end:
+        if time.time() >= next_keepalive:
+            send(host, "UPDATE1A", "Geralt", "x")
+            send(listener, "UPDATE1A", "Listener", "x")
+            next_keepalive += 1
+        try:
+            parts = listener.recv(8192).decode().split("\t")
+        except (socket.timeout, ConnectionResetError):
+            continue
+        if parts[0] == "UPDATE1A" and len(parts) >= 3:
+            seen[parts[2]] = seen.get(parts[2], 0) + 1
+    # repeats (for lost packets) come at least twice as often as on a normal server; the tick aims at 33 ms, but
+    # Windows wakes a sleeping Java thread in ~15.6 ms steps, so 20-30 a second depending on the timer
+    rate = seen.get("Geralt", 0) / 3
+    check("--lan: state repeated 20-36 times a second", 18 <= rate <= 36, (rate, seen))
+
+    # what makes it smooth: new state is forwarded the moment it arrives, not on the next tick
+    delays = []
+    for i in range(10):
+        value = f"v{i}"
+        sent_at = time.perf_counter()
+        send(host, "UPDATE1A", "Geralt", value)
+        got_at = None
+        end = time.time() + 0.5
+        while time.time() < end and got_at is None:
+            try:
+                parts = listener.recv(8192).decode().split("\t")
+            except (socket.timeout, ConnectionResetError):
+                continue
+            if parts[0] == "UPDATE1A" and len(parts) >= 4 and parts[2] == "Geralt" and parts[3] == value:
+                got_at = time.perf_counter()
+        if got_at is not None:
+            delays.append((got_at - sent_at) * 1000)
+        send(listener, "UPDATE1A", "Listener", "x")
+        time.sleep(0.15)
+    delays.sort()
+    median = delays[len(delays) // 2] if delays else None
+    check("--lan: new state forwarded on arrival (median under 10 ms)", len(delays) == 10 and median < 10,
+          [round(d, 1) for d in delays])
+
+    q = client(port)
+    send(q, "DISCOVER", "W3COOP", PROTOCOL)
+    d = wait_for(q, "W3COOP_HOST", 2)
+    check("--lan: discovery answer carries the save port", d is not None and len(d) >= 6 and d[5] == str(crash_port), d)
+
+    # the host's newest save
+    base = f"http://127.0.0.1:{crash_port}/save/latest"
+    try:
+        info = urllib.request.urlopen(base + "/info", timeout=5).read().decode().strip().split("\t")
+        sav = urllib.request.urlopen(base + "/sav", timeout=5).read()
+        png = urllib.request.urlopen(base + "/png", timeout=5).read()
+    except urllib.error.URLError as err:
+        info, sav, png = [str(err)], b"", b""
+    newest = os.path.join(saves_dir, "ManualSave_2.sav")
+    check("save hand-off: the newest save is offered", info[0] == "ManualSave_2.sav" and info[1] == str(os.path.getsize(newest)), info)
+    check("save hand-off: save and screenshot arrive intact",
+          sav == open(newest, "rb").read() and png == open(os.path.join(saves_dir, "ManualSave_2.png"), "rb").read())
+
+    # package\lan-join.ps1 on a copy of the game's bin layout: finds the host, fetches the save, writes config.xml
+    if lan_join and os.path.exists(lan_join):
+        game_bin = os.path.join(work, "game", "bin")
+        os.makedirs(os.path.join(game_bin, "w3coop"))
+        os.makedirs(os.path.join(game_bin, "WitcherOnline"))
+        script = shutil.copy(lan_join, os.path.join(game_bin, "w3coop"))
+        run = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Name", "Yennefer",
+                              "-Port", str(port)], capture_output=True, text=True, timeout=120)
+        print("  lan-join.ps1: " + " | ".join(line for line in run.stdout.splitlines() if line.strip()))
+        config = os.path.join(game_bin, "WitcherOnline", "config.xml")
+        text = open(config, encoding="utf-8-sig").read() if os.path.exists(config) else ""
+        fetched = os.path.join(game_bin, "WitcherOnline", "coop-profile", "The Witcher 3", "gamesaves", "ManualSave_2.sav")
+        check("lan-join: host found and config written",
+              "<Role>member</Role>" in text and "<CoopProfile>true</CoopProfile>" in text and "<ServerIP>auto</ServerIP>" not in text
+              and f"<Port>{port}</Port>" in text, text)
+        check("lan-join: host's save in the co-op profile, set to load",
+              os.path.exists(fetched) and open(fetched, "rb").read() == open(newest, "rb").read()
+              and "<AutoLoadSave>ManualSave_2</AutoLoadSave>" in text, (os.path.exists(fetched), text))
+
+
+def profile_tests(harness, work):
+    wo = os.path.join(work, "profile", "WitcherOnline")
+    os.makedirs(wo)
+    out = subprocess.run([harness, wo], capture_output=True, text=True, timeout=30).stdout
+    check("profile off: Documents untouched", f"known={os.path.join(wo, 'coop-profile')}" not in out, out)
+
+    with open(os.path.join(wo, "config.xml"), "w") as f:
+        f.write('<?xml version="1.0"?>\n<Config>\n\t<CoopProfile>true</CoopProfile>\n</Config>\n')
+    out = subprocess.run([harness, wo], capture_output=True, text=True, timeout=30).stdout
+    want = os.path.join(wo, "coop-profile")
+    lines = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    check("profile on: Documents redirected through all three APIs",
+          all(os.path.normcase(lines.get(k, "")) == os.path.normcase(want) for k in ("known", "wide", "narrow")), out)
+    check("profile on: gamesaves folder created", os.path.isdir(os.path.join(want, "The Witcher 3", "gamesaves")))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--jar", required=True)
     ap.add_argument("--harness")
+    ap.add_argument("--profile-harness")
+    ap.add_argument("--lan-join", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "package", "lan-join.ps1"))
     ap.add_argument("--port", type=int, default=41910)
     a = ap.parse_args()
     crash_port = a.port + 3
@@ -223,6 +384,7 @@ def main():
     try:
         time.sleep(2)
         server_tests(a.port, crash_port, server_dir)
+        normal_server_lan_checks(a.port)
         if a.harness:
             harness_tests(a.harness, a.port, crash_port, server_dir, work)
     finally:
@@ -232,6 +394,38 @@ def main():
             server.wait(5)
         except (OSError, subprocess.TimeoutExpired):
             server.kill()
+
+    # a second server as "Host LAN co-op.cmd" starts it: --lan and the host's saves folder (two saves, the second newer)
+    lan_port, lan_crash = a.port + 20, a.port + 23
+    lan_dir = os.path.join(work, "server-lan")
+    saves = os.path.join(work, "host-saves")
+    os.makedirs(lan_dir)
+    os.makedirs(saves)
+    for i, age in ((1, 120), (2, 0)):
+        for ext, size in ((".sav", 300000 + i), (".png", 5000 + i)):
+            path = os.path.join(saves, f"ManualSave_{i}{ext}")
+            with open(path, "wb") as f:
+                f.write(os.urandom(size))
+            os.utime(path, (time.time() - age, time.time() - age))
+    lan_jar = shutil.copy(a.jar, lan_dir)
+    with open(os.path.join(lan_dir, "server.properties"), "w") as f:
+        f.write(f"crashPort={lan_crash}\n")
+    lan_server = subprocess.Popen(["java", "-jar", lan_jar, str(lan_port), "--lan", "--saves", saves], cwd=lan_dir,
+                                  stdin=subprocess.PIPE, stdout=open(os.path.join(work, "server-lan.log"), "w"),
+                                  stderr=subprocess.STDOUT)
+    try:
+        time.sleep(2)
+        lan_server_tests(lan_port, lan_crash, saves, a.lan_join, work)
+    finally:
+        try:
+            lan_server.stdin.write(b"stop\n")
+            lan_server.stdin.flush()
+            lan_server.wait(5)
+        except (OSError, subprocess.TimeoutExpired):
+            lan_server.kill()
+
+    if a.profile_harness:
+        profile_tests(a.profile_harness, work)
 
     print(f"\n{len(passed)} passed, {len(failures)} failed (server log: {os.path.join(work, 'server.log')})")
     print("RESULT:", "FAIL" if failures else "PASS")
