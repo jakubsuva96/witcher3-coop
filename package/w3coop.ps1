@@ -35,6 +35,49 @@ function Write-Config([string]$name, [string]$serverIp)
     [IO.File]::WriteAllText($ConfigPath, $xml, (New-Object Text.UTF8Encoding $false))
 }
 
+# F6 opens the co-op chat. The game rewrites input.settings when it exits, so this runs before it starts.
+function Install-ChatKey
+{
+    $path = Join-Path $W3Docs 'input.settings'
+    if (-not (Test-Path $path) -or (Get-Process witcher3 -ErrorAction SilentlyContinue)) { return }
+    $sections = 'Exploration', 'Exploration_Replacer_Ciri', 'Horse', 'Horse_Replacer_Ciri', 'Combat', 'Combat_Replacer_Ciri', 'Swimming', 'Boat'
+    $lines = [IO.File]::ReadAllLines($path)
+    $out = New-Object System.Collections.Generic.List[string]
+    $current = ''; $hasChat = @{}
+    foreach ($l in $lines) { if ($l -match '^\[(.+)\]$') { $current = $Matches[1] } elseif ($l -match 'Action=WO_Chat\)') { $hasChat[$current] = $true } }
+    $changed = $false
+    foreach ($l in $lines)
+    {
+        $out.Add($l)
+        if ($l -match '^\[(.+)\]$' -and $sections -contains $Matches[1] -and -not $hasChat[$Matches[1]])
+        {
+            $out.Add('IK_F6=(Action=WO_Chat)'); $changed = $true
+        }
+    }
+    if ($changed)
+    {
+        Copy-Item $path "$path.w3coop.bak" -Force
+        [IO.File]::WriteAllText($path, ($out -join "`r`n") + "`r`n", (New-Object Text.UTF8Encoding $false))
+        Say 'Chat je na klávese F6.' 'Green'
+    }
+}
+
+# The console (~) gives the co-op commands: chat, resync, teleport, join.
+function Enable-Console
+{
+    $ini = Join-Path $GameRoot 'bin\config\base\general.ini'
+    try
+    {
+        if ((Test-Path $ini) -and -not (Select-String -Path $ini -Pattern '^DBGConsoleOn=true' -Quiet))
+        {
+            $text = [IO.File]::ReadAllText($ini)
+            if ($text -and -not $text.EndsWith("`n")) { $text += "`r`n" }
+            [IO.File]::WriteAllText($ini, $text + "DBGConsoleOn=true`r`n", (New-Object Text.ASCIIEncoding))
+        }
+    }
+    catch { }
+}
+
 function Start-Game
 {
     if ($NoGame) { return }
@@ -135,6 +178,8 @@ function Install-CoopSave([string]$zipPath)
 
 $host.UI.RawUI.WindowTitle = "Zaklínač 3 co-op ($Mode)"
 $name = Get-Username
+Install-ChatKey
+Enable-Console
 
 if ($Mode -eq 'host')
 {
