@@ -1,4 +1,4 @@
 [submodule "WitcherOnline"]
 	path = WitcherOnline
-	url = https://github.com/Emillock/WitcherOnline.git
-	branch = shared-enemies
+	url = https://github.com/jakubsuva96/WitcherOnline.git
+	branch = lan-stage3
