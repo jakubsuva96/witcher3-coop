@@ -3,16 +3,20 @@
 param(
     [Parameter(Mandatory = $true)][ValidateSet('host', 'join')][string]$Mode,
     [string]$HostAddress = '',
-    [switch]$NoGame
+    [switch]$NoGame,
+    [int]$Port = 40000,
+    # tests point this somewhere else than the real Documents
+    [string]$DocumentsDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
-$GamePort = 40000
+$GamePort = $Port
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $GameRoot = (Resolve-Path (Join-Path $Here '..\..')).Path
 $ConfigPath = Join-Path $GameRoot 'bin\WitcherOnline\config.xml'
 $GameExe = Join-Path $GameRoot 'bin\x64_dx12\witcher3.exe'
-$W3Docs = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'The Witcher 3'
+if (-not $DocumentsDir) { $DocumentsDir = [Environment]::GetFolderPath('MyDocuments') }
+$W3Docs = Join-Path $DocumentsDir 'The Witcher 3'
 $SavesDir = Join-Path $W3Docs 'gamesaves'
 $SlotRecord = Join-Path $W3Docs 'w3coop-slot.txt'
 
@@ -29,9 +33,10 @@ function Get-Username
     return $env:USERNAME
 }
 
-function Write-Config([string]$name, [string]$serverIp)
+# Role host/member turns on the client's LAN timing (remote players follow 0.15 s behind instead of 0.4 s).
+function Write-Config([string]$name, [string]$serverIp, [string]$role)
 {
-    $xml = "<?xml version=`"1.0`" encoding=`"UTF-8`"?>`r`n<Config>`r`n    <Username>$name</Username>`r`n    <ServerIP>$serverIp</ServerIP>`r`n    <Port>$GamePort</Port>`r`n</Config>`r`n"
+    $xml = "<?xml version=`"1.0`" encoding=`"UTF-8`"?>`r`n<Config>`r`n    <Username>$name</Username>`r`n    <ServerIP>$serverIp</ServerIP>`r`n    <Port>$GamePort</Port>`r`n    <Role>$role</Role>`r`n</Config>`r`n"
     [IO.File]::WriteAllText($ConfigPath, $xml, (New-Object Text.UTF8Encoding $false))
 }
 
@@ -128,7 +133,8 @@ function Find-Host([string]$fixed, [int]$seconds)
                     $parts = [Text.Encoding]::UTF8.GetString($udp.Receive([ref]$from)).Split("`t")
                     if ($parts[0] -eq 'W3COOP_HOST')
                     {
-                        return @{ Ip = $from.Address.ToString(); SavePort = [int]$parts[4] }
+                        # protocol, version, port, players, save port
+                        return @{ Ip = $from.Address.ToString(); SavePort = [int]$parts[5] }
                     }
                 }
                 catch [Net.Sockets.SocketException] { }
@@ -189,14 +195,14 @@ if ($Mode -eq 'host')
         Fail 'Co-op server už běží v jiném okně. Zavři ho a spusť tohle znovu.'
     }
 
-    Write-Config $name '127.0.0.1'
+    Write-Config $name '127.0.0.1' 'host'
     Say "Hostuješ jako $name." 'Green'
     Say 'Adresy tohoto PC v síti:'
     Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
         ForEach-Object { Say ("  {0}  ({1})" -f $_.IPAddress, $_.InterfaceAlias) }
 
     Say ''
-    Say "Kdyby druhému hráči nešla stáhnout tvoje uložená hra, povol jednou ve firewallu TCP $($GamePort + 1)" 'DarkGray'
+    Say "Kdyby druhému hráči nešla stáhnout tvoje uložená hra, povol jednou ve firewallu TCP $($GamePort + 1) (a TCP 40003 pro jeho crash reporty)" 'DarkGray'
     Say '(pravý klik na Start > Terminál (správce)):' 'DarkGray'
     Say "  netsh advfirewall firewall add rule name=`"W3 Co-op save`" dir=in action=allow protocol=TCP localport=$($GamePort + 1)" 'DarkGray'
 
@@ -205,7 +211,7 @@ if ($Mode -eq 'host')
     Say 'Druhý hráč spustí "Join LAN co-op.cmd" a připojí se sám.'
     Say ''
     Start-Game
-    & java -jar (Join-Path $Here 'server\WitcherServer.jar') $GamePort --saves $SavesDir
+    & java -jar (Join-Path $Here 'server\WitcherServer.jar') $GamePort --lan --saves $SavesDir
     Read-Host 'Server skončil. Stiskni Enter pro zavření' | Out-Null
     exit 0
 }
@@ -222,7 +228,7 @@ if (-not $found)
           "  - má host ve firewallu povolený UDP port $GamePort?")
 }
 Say "Host nalezen: $($found.Ip)" 'Green'
-Write-Config $name $found.Ip
+Write-Config $name $found.Ip 'member'
 
 function Get-HostSave([string]$saveBase)
 {
