@@ -8,7 +8,7 @@ where java >nul 2>&1 || (
   pause
   exit /b 1
 )
-set "NAME=Player"
+set "NAME=%USERNAME%"
 if exist name.txt set /p NAME=<name.txt
 set "INPUT="
 set /p INPUT=Your name in the game [%NAME%]:

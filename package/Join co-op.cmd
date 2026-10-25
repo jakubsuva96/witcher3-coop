@@ -2,7 +2,7 @@
 rem Joins a friend's Witcher 3 co-op game through Steam (no IP address or port forwarding).
 setlocal
 cd /d "%~dp0"
-set "NAME=Player"
+set "NAME=%USERNAME%"
 if exist name.txt set /p NAME=<name.txt
 set "INPUT="
 set /p INPUT=Your name in the game [%NAME%]:

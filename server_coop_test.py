@@ -1,6 +1,7 @@
 # Checks the Witcher Online server's COOP channel without the game: two fake UDP clients store co-op state,
-# the server rebroadcasts each player's latest value per channel to everyone, and ignores channels past the limit.
-# Usage: server_coop_test.py [--port 41900]
+# the server rebroadcasts each player's latest value per channel to everyone, and past the channel limit the channel
+# heard from least recently gives way.
+# Usage: server_coop_test.py [--port 41900] [--jar path\to\WitcherServer.jar]
 import argparse
 import os
 import socket
@@ -12,6 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import WO  # noqa: E402
 
 JAR = os.path.join(WO, "server", "build", "WitcherServer.jar")
+# keep in step with WitcherServer.PROTOCOL_VERSION / MOD_VERSION
+PROTOCOL, MOD_VERSION = "1", "0.3.0-dev"
 
 
 def client(port):
@@ -42,14 +45,18 @@ def collect(s, seconds):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=41900)
+    ap.add_argument("--jar", default=JAR)
     a = ap.parse_args()
 
-    server = subprocess.Popen(["java", "-jar", JAR, str(a.port)], cwd=os.path.dirname(JAR),
+    server = subprocess.Popen(["java", "-jar", a.jar, str(a.port)], cwd=os.path.dirname(a.jar),
                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     failures = []
     try:
         time.sleep(2)
         alice, bob = client(a.port), client(a.port)
+        # the version handshake: without it the server drops a client after 5 s
+        send(alice, "HELLO", "Alice", PROTOCOL, MOD_VERSION, "5.0.15.65482")
+        send(bob, "HELLO", "Bob", PROTOCOL, MOD_VERSION, "5.0.15.65482")
 
         send(alice, "COOP", "Alice", "en", "7", "1", "0")
         send(bob, "COOP", "Bob", "hit", "Alice", "7", "1")
@@ -66,11 +73,14 @@ def main():
         if collect(bob, 1.0).get(("Alice", "en")) != ["en", "7", "2", "0"]:
             failures.append("Alice's updated 'en' state did not replace the old one")
 
-        # at most 4 channels per player, names up to 8 characters
-        for channel in ("c1", "c2", "c3", "c4", "c5", "toolongname"):
+        # at most 8 channels per player, names up to 8 characters; when full, the channel heard from least recently
+        # gives way ('en', then 'c1'), so a player whose role changed still gets its new channels through
+        for channel in ("c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "toolongname"):
             send(alice, "COOP", "Alice", channel, "x")
+            time.sleep(0.01)
+        collect(bob, 0.5)  # the forwards on arrival include channels that gave way right after
         channels = sorted(ch for (who, ch) in collect(bob, 1.0) if who == "Alice")
-        if len(channels) != 4 or "toolongname" in channels or "en" not in channels:
+        if channels != sorted(f"c{i}" for i in range(2, 10)):
             failures.append(f"channel limit not applied: Alice's channels {channels}")
 
         # the old opcodes still work next to COOP
